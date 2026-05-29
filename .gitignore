@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.uv/
+
+# Transcripts & distillation working dirs (these can be large and may contain
+# channel content — never commit them)
+*_transcripts/
+transcripts/
+_findings/
+_smoke/
+ids.txt
+*_failed.txt
+
+# ASR / secrets — never commit credentials
+.env
+.env.*
+*.key
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
