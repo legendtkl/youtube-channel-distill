@@ -7,9 +7,10 @@ description: >
   `talkjun-stock-analysis` was built. Use this skill whenever the user wants to "蒸馏/distill a
   YouTube channel/blogger into a skill", "把某个 up 主/频道做成一个 skill", "学习某个博主的分析方法/框架",
   "提炼某个 YouTube 频道的方法论", clone a creator's analysis style, or build a methodology skill from
-  video transcripts. It covers the full pipeline: list videos (yt-dlp) → transcribe with a
-  CONFIGURABLE ASR backend (no captions needed) → fan-out distillation with parallel subagents →
-  per-category merge/dedupe → assemble the output skill. The ASR model is configured by the user at
+  video transcripts. It covers the full pipeline: list videos (yt-dlp) → get text (captions-first:
+  use the video's own subtitles when present, fall back to ASR only for videos without captions) →
+  fan-out distillation with parallel subagents → per-category merge/dedupe → assemble the output
+  skill. ASR is optional; videos without captions are skipped unless ASR is configured by the user at
   run time via env vars (ASR_BACKEND / ASR_BASE_URL / ASR_API_KEY / ASR_MODEL) — a service endpoint:
   an OpenAI-compatible omni/chat model that accepts audio (e.g. Volcano Ark omni), or any
   OpenAI-compatible Whisper-style /audio/transcriptions endpoint.
@@ -51,7 +52,7 @@ export ASR_API_KEY=<你的 key>
 export ASR_MODEL=<你的 endpoint/model id，如 ep-xxxxxxxxxxxxx-xxxxx>
 ```
 
-确认用户已给出后端与 model 再继续。两个后端的差异、坑、`input_audio` 走 `chat.completions` 而非 `responses` 的关键点，见 `references/asr-pipeline.md`。
+**ASR 是可选的**：阶段 2 字幕优先，只有遇到**没有字幕**的视频才需要 ASR。若用户不配 ASR，无字幕的视频会被跳过（适合只蒸馏有字幕的频道）。要覆盖无字幕视频就让用户给出后端与 model。两个后端的差异、坑、`input_audio` 走 `chat.completions` 而非 `responses` 的关键点，见 `references/asr-pipeline.md`。
 
 ### 阶段 1 · 列视频清单
 
@@ -61,7 +62,7 @@ scripts/list_videos.sh "https://www.youtube.com/@<handle>/videos" 50
 
 输出 `id\t时长\t标题`。先扫一眼：剔除 Shorts/纯广告/重复直播，确认这些视频确实承载方法论。把要转写的 id 存成 `ids.txt`。
 
-### 阶段 2 · ASR 转写（无字幕也能做）
+### 阶段 2 · 拿文本（字幕优先，ASR 兜底）
 
 ```bash
 uv run scripts/transcribe.py --ids-file ids.txt --out ./<channel>_transcripts
@@ -69,7 +70,13 @@ uv run scripts/transcribe.py --ids-file ids.txt --out ./<channel>_transcripts
 uv run scripts/transcribe.py --channel "https://www.youtube.com/@<handle>/videos" --limit 50 --out ./<channel>_transcripts
 ```
 
-每条视频产出 `<out>/<vid>.txt`（带标题/日期/时长头），**断点续跑**（已转写的跳过）。下音频 → PyAV 解码 16k 单声道 → 切片 → 调 ASR → 拼接。细节/排错见 `references/asr-pipeline.md`。
+**每条视频的处理策略**：
+
+1. **有字幕 → 直接用字幕**，不调 ASR（默认只用 UP 主上传的字幕；加 `--auto-subs` 才用 YouTube 自动字幕）。
+2. **无字幕 + 配了 ASR**（`ASR_API_KEY` + `ASR_MODEL`）→ 走 ASR：下音频 → PyAV 解码 16k 单声道 → 切片 → 调 ASR → 拼接。
+3. **无字幕 + 没配 ASR** → **跳过该视频**（结尾会汇总跳过数，并提示配置 ASR）。
+
+每条产出 `<out>/<vid>.txt`（头部含标题/日期/时长 + `source=captions:.../asr`），**断点续跑**（已有的跳过）。`--sub-langs` 配字幕语言优先级（默认 `zh-Hans,zh,zh-Hant,en`）。细节/排错见 `references/asr-pipeline.md`。
 
 ### 阶段 3 · 并行蒸馏（fan-out）
 

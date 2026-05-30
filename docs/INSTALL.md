@@ -11,8 +11,8 @@
 | Tool | Why | Install |
 |---|---|---|
 | [`uv`](https://docs.astral.sh/uv/) | runs `transcribe.py` and manages its deps | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| `yt-dlp` | list + download YouTube audio | pulled on demand via `uvx yt-dlp` (no manual install) |
-| An ASR backend | speech-to-text | see [README → ASR backends](../README.md#asr-backends) |
+| `yt-dlp` | list videos + fetch subtitles/audio | pulled on demand via `uvx yt-dlp` (no manual install) |
+| An ASR backend *(optional)* | transcribe videos **without** captions; skip it and caption-less videos are skipped | see [README → ASR backends](../README.md#asr-backends) |
 
 You do **not** need a system `ffmpeg` — `transcribe.py` decodes audio with PyAV,
 which bundles its own codecs.
@@ -43,6 +43,12 @@ scripts/list_videos.sh "https://www.youtube.com/@<handle>/videos" 5
 
 # (b) the transcriber's help — confirms uv resolves deps (openai, av, numpy, yt-dlp)
 uv run scripts/transcribe.py --help
+
+# (c) captions-only smoke test — NO API key needed. A video with subtitles is
+#     saved via captions; one without is skipped. Add --auto-subs to also use
+#     YouTube auto-captions.
+uv run scripts/transcribe.py --ids <VIDEO_WITH_SUBS> --out ./_smoke --auto-subs
+head -1 ./_smoke/<VIDEO_WITH_SUBS>.txt   # header shows source=captions:...
 ```
 
 ### 4. End-to-end test against your ASR endpoint
@@ -79,8 +85,8 @@ troubleshooting.
 | 工具 | 用途 | 安装 |
 |---|---|---|
 | [`uv`](https://docs.astral.sh/uv/) | 运行 `transcribe.py`、管理依赖 | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| `yt-dlp` | 列出 + 下载 YouTube 音频 | 由 `uvx yt-dlp` 按需拉取（无需手动安装） |
-| 一个 ASR 后端 | 语音转文字 | 见 [README → ASR 后端](../README.zh-CN.md#asr-后端) |
+| `yt-dlp` | 列视频 + 拉字幕/音频 | 由 `uvx yt-dlp` 按需拉取（无需手动安装） |
+| 一个 ASR 后端（可选） | 转写**没有字幕**的视频；不配则无字幕视频被跳过 | 见 [README → ASR 后端](../README.zh-CN.md#asr-后端) |
 
 **不需要**系统 `ffmpeg`——`transcribe.py` 用 PyAV 解码，自带编解码器。
 
@@ -110,6 +116,11 @@ scripts/list_videos.sh "https://www.youtube.com/@<handle>/videos" 5
 
 # (b) 转写器 help——确认 uv 能解析依赖（openai、av、numpy、yt-dlp）
 uv run scripts/transcribe.py --help
+
+# (c) 仅字幕冒烟测——无需 API key。有字幕的视频走字幕保存，没字幕的跳过；
+#     加 --auto-subs 还能用 YouTube 自动字幕。
+uv run scripts/transcribe.py --ids <有字幕的视频ID> --out ./_smoke --auto-subs
+head -1 ./_smoke/<有字幕的视频ID>.txt   # 头部会显示 source=captions:...
 ```
 
 ### 4. 对你的 ASR 端点做端到端测试

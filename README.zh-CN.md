@@ -24,15 +24,20 @@
 
 ```
 列视频清单（yt-dlp）
-   └─> 用可配置 ASR 后端转写（不需要字幕）
-         └─> 把转写稿分批派给并行 subagent 提炼
-               └─> 按类别合并 / 去重
-                     └─> 组装输出 skill（SKILL.md + references + sources.md）
+   └─> 逐条取文本 —— 字幕优先：
+         ├─ 有字幕？  直接用字幕（不调 ASR）
+         └─ 无字幕？  配了 ASR 就转写，没配就跳过该视频
+               └─> 把文稿分批派给并行 subagent 提炼
+                     └─> 按类别合并 / 去重
+                           └─> 组装输出 skill（SKILL.md + references + sources.md）
 ```
 
 关键设计：
 
-- **不需要字幕。** 下载音频走 ASR 转写，所以即使频道关了自动字幕、或语言的 YT 字幕质量差也能做。
+- **字幕优先。** 视频本身有字幕就直接用，不调 ASR——更快更省。默认只用 UP 主上传的字幕；
+  YouTube 自动字幕需显式开启（`--auto-subs`）。
+- **ASR 可选，只为没字幕的视频兜底。** 配了后端就转写无字幕的视频；不配则这些视频**直接跳过**
+  （适合已经全程配了字幕的频道）。
 - **ASR 后端可配置。** 运行时用环境变量选**服务化端点**——能吃音频的 OpenAI 兼容 omni/chat
   模型，或任意 OpenAI 兼容的 Whisper 风格 `/audio/transcriptions` 端点。**代码里不写死任何 key。**
 - **渐进式披露的产物。** 生成的 skill 让 `SKILL.md` 保持精简（路由 + 第一性原理），细节进
@@ -46,9 +51,9 @@
 
 | 阶段 | 做什么 | 工具 |
 |---|---|---|
-| **0 · 配置 ASR** | 用环境变量选后端 + 模型 | `references/asr-pipeline.md` |
+| **0 · 配置 ASR**（可选） | 用环境变量选后端 + 模型（仅无字幕视频才需要） | `references/asr-pipeline.md` |
 | **1 · 列视频** | 拉频道上传列表（id、时长、标题） | `scripts/list_videos.sh` |
-| **2 · 转写** | 下音频 → 解码 → 切片 → ASR → 文本 | `scripts/transcribe.py` |
+| **2 · 取文本** | 字幕优先：有字幕用字幕，无字幕走 ASR（配了的话），否则跳过 | `scripts/transcribe.py` |
 | **3 · 扇出蒸馏** | 转写稿分批派给并行 subagent → 结构化要点 | `references/distillation-method.md` |
 | **4 · 按类合并** | 每类一个 subagent → 去重后的 `references/<类>.md` | `references/distillation-method.md` |
 | **5 · 组装 skill** | 写 `SKILL.md` + 第一性原理 + `sources.md` | `references/distillation-method.md` |
@@ -76,13 +81,21 @@ scripts/list_videos.sh "https://www.youtube.com/@<handle>/videos" 50 | tee ids.t
 
 扫一眼清单，剔除 Shorts / 纯广告 / 重复直播，留下真正承载方法论的 id。
 
-### 2. 转写
-
-用环境变量把脚本指向你的 ASR 服务端点（代码里什么都不写死），然后运行：
+### 2. 取文本（字幕优先）
 
 ```bash
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy   # 端点走直连
 
+# 仅字幕（不调 ASR）：有字幕的存下来，其余跳过
+uv run scripts/transcribe.py --ids-file ids.txt --out ./channel_transcripts
+
+# 也接受 YouTube 自动字幕（质量较低，但覆盖更多视频）：
+uv run scripts/transcribe.py --ids-file ids.txt --out ./channel_transcripts --auto-subs
+```
+
+要把**没字幕**的视频也转出来，再额外用环境变量指向一个 ASR 服务端点（代码里什么都不写死）：
+
+```bash
 export ASR_BACKEND=ark-omni                            # ark-omni | whisper-api
 export ASR_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # 你的 OpenAI 兼容端点
 export ASR_API_KEY=<你的 key>
@@ -91,8 +104,8 @@ export ASR_MODEL=<你的 endpoint/model id>
 uv run scripts/transcribe.py --ids-file ids.txt --out ./channel_transcripts
 ```
 
-产出：每条视频一个 `channel_transcripts/<vid>.txt`（带元信息头部）。**断点续跑**——
-已转写的视频会跳过。
+产出：每条视频一个 `channel_transcripts/<vid>.txt`（头部记录来源 `source=captions:…`
+或 `source=asr`）。**断点续跑**——已有的会跳过；结尾汇总有多少来自字幕、多少来自 ASR、多少被跳过。
 
 ### 3–5. 蒸馏成 skill
 
@@ -104,6 +117,7 @@ uv run scripts/transcribe.py --ids-file ids.txt --out ./channel_transcripts
 
 ## ASR 后端
 
+ASR 只对**没有字幕**的视频生效，且需配齐（`ASR_API_KEY` 和 `ASR_MODEL` 都要设）才会启用。
 后端由 `ASR_BACKEND`（或 `--backend`）选择，两者都是**服务化端点**——不在本地起模型。
 所有配置走环境变量，代码里不写死任何厂商信息。
 

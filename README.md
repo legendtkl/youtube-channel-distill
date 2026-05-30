@@ -55,9 +55,9 @@ Key design choices:
 
 | Stage | What happens | Tooling |
 |---|---|---|
-| **0 · Configure ASR** | Choose backend + model via env vars | `references/asr-pipeline.md` |
+| **0 · Configure ASR** *(optional)* | Choose backend + model via env vars (only needed for caption-less videos) | `references/asr-pipeline.md` |
 | **1 · List videos** | Pull the channel's uploads (id, duration, title) | `scripts/list_videos.sh` |
-| **2 · Transcribe** | Download audio → decode → chunk → ASR → text | `scripts/transcribe.py` |
+| **2 · Get text** | Captions-first: use subtitles if present, else ASR (if configured), else skip | `scripts/transcribe.py` |
 | **3 · Fan-out distill** | Batch transcripts to parallel subagents → structured findings | `references/distillation-method.md` |
 | **4 · Merge per category** | One subagent per category → deduped `references/<cat>.md` | `references/distillation-method.md` |
 | **5 · Assemble skill** | Write `SKILL.md` + first principles + `sources.md` | `references/distillation-method.md` |
@@ -88,14 +88,22 @@ scripts/list_videos.sh "https://www.youtube.com/@<handle>/videos" 50 | tee ids.t
 Skim the list, drop Shorts / pure ads / duplicate livestreams, and keep the ids
 that actually carry the methodology.
 
-### 2. Transcribe
-
-Point the script at your ASR service endpoint via env vars (nothing is
-hard-coded), then run it:
+### 2. Get the text (captions-first)
 
 ```bash
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy   # endpoints want a direct connection
 
+# captions-only (no ASR): videos with subtitles are saved, the rest are skipped
+uv run scripts/transcribe.py --ids-file ids.txt --out ./channel_transcripts
+
+# also accept YouTube auto-captions (lower quality, but covers more videos):
+uv run scripts/transcribe.py --ids-file ids.txt --out ./channel_transcripts --auto-subs
+```
+
+To transcribe caption-less videos, additionally point the script at an ASR
+service endpoint via env vars (nothing is hard-coded):
+
+```bash
 export ASR_BACKEND=ark-omni                            # ark-omni | whisper-api
 export ASR_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # your OpenAI-compatible endpoint
 export ASR_API_KEY=<your key>
@@ -104,8 +112,10 @@ export ASR_MODEL=<your endpoint/model id>
 uv run scripts/transcribe.py --ids-file ids.txt --out ./channel_transcripts
 ```
 
-Output: one `channel_transcripts/<vid>.txt` per video, with a metadata header.
-The run is **resumable** — already-transcribed videos are skipped.
+Output: one `channel_transcripts/<vid>.txt` per video, with a metadata header
+that records the source (`source=captions:…` or `source=asr`). The run is
+**resumable** — already-saved videos are skipped, and the final summary reports
+how many came from captions, ASR, or were skipped.
 
 ### 3–5. Distill into a skill
 
@@ -118,9 +128,11 @@ then assemble `SKILL.md` + `references/` + `sources.md`.
 
 ## ASR backends
 
-The backend is selected by `ASR_BACKEND` (or `--backend`). Both are **service
-endpoints** — no model runs locally. All config is via env vars, so no provider
-details are baked into the code.
+ASR only runs for videos **without** captions, and only if configured (both
+`ASR_API_KEY` and `ASR_MODEL` must be set). The backend is selected by
+`ASR_BACKEND` (or `--backend`). Both are **service endpoints** — no model runs
+locally. All config is via env vars, so no provider details are baked into the
+code.
 
 | Backend | When to use | Required env |
 |---|---|---|

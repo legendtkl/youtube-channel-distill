@@ -1,13 +1,22 @@
-# ASR 转写管线 · 配置与排错
+# 取文本管线（字幕优先 / ASR 兜底）· 配置与排错
 
-`scripts/transcribe.py` 是转写引擎。它**不需要系统 ffmpeg**（PyAV 自带编解码），流程是：
+`scripts/transcribe.py` 是取文本引擎。**每条视频先看有没有字幕**：
 
 ```
-yt-dlp -f bestaudio 下音频  →  PyAV 解码成 16k 单声道 s16 PCM  →  切 600s/片
-     →  每片调 ASR 后端  →  按序拼接  →  写 <out>/<vid>.txt（带头部）
+yt-dlp -J 取视频信息（含字幕清单）
+  ├─ 有字幕 ──────────────→ 下载字幕 → 去时间轴/标签 → 写 <out>/<vid>.txt   (source=captions:...)
+  │     （默认只用 UP 主上传的字幕；--auto-subs 才用 YouTube 自动字幕）
+  └─ 无字幕
+        ├─ 配了 ASR → yt-dlp 下音频 → PyAV 解码 16k 单声道 → 切 600s/片
+        │              → 每片调 ASR 后端 → 按序拼接 → 写文件            (source=asr)
+        └─ 没配 ASR → 跳过该视频（结尾汇总跳过数）
 ```
 
-断点续跑：输出已存在且 >200 字节就跳过。失败的 id 落到 `<out>/_failed.txt`。
+- **字幕优先**省钱省时：有字幕就不调 ASR。`--sub-langs` 配语言优先级（默认 `zh-Hans,zh,zh-Hant,en`，匹配不到时退回该视频任一可用字幕轨）。
+- **ASR 可选**：`ASR_API_KEY` + `ASR_MODEL` 都给齐才算"配了 ASR"；否则无字幕的视频会被跳过。
+- **不需要系统 ffmpeg**（ASR 路径用 PyAV 自带编解码）。
+- 断点续跑：输出已存在且 >200 字节就跳过。失败的 id 落到 `<out>/_failed.txt`。
+- 输出头部含 `source=`，可一眼看出这篇是字幕还是 ASR 来的。
 
 ---
 
@@ -56,12 +65,16 @@ uv run scripts/transcribe.py \
   --channel "https://www.youtube.com/@handle/videos"  # 或 --ids a,b,c / --ids-file ids.txt
   --limit 50 \
   --out ./<channel>_transcripts \
-  --chunk-seconds 600 \      # 切片长度；600s 实测稳，过长可能超 payload/超时
-  --concurrency 4 \          # 单视频内分片并发
+  --sub-langs "zh-Hans,zh,en" \  # 字幕语言优先级（字幕优先策略）
+  --auto-subs \              # 也接受 YouTube 自动字幕（默认只用 UP 主上传的字幕）
+  --chunk-seconds 600 \      # ASR 切片长度；600s 实测稳，过长可能超 payload/超时
+  --concurrency 4 \          # 单视频内分片并发（ASR）
   --backend ark-omni \       # 覆盖 ASR_BACKEND
   --model ep-xxxx \          # 覆盖 ASR_MODEL
-  --prompt "自定义转写提示词"
+  --prompt "自定义转写提示词" # ASR 转写提示词
 ```
+
+> 不配 `ASR_API_KEY` / `ASR_MODEL` 也能跑——此时只取有字幕的视频，无字幕的跳过。
 
 ---
 
@@ -71,8 +84,10 @@ uv run scripts/transcribe.py \
 |---|---|
 | 连不上端点 / 一直卡住不报错 | 多半是代理没 unset。`unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy` 重试 |
 | `unknown field input_audio` | 用了 `responses` API 收音频。本脚本默认 `chat.completions`；若你改过代码，改回去 |
-| `ASR_API_KEY is not set` | 两个后端都必须设 key |
-| `ASR_MODEL / --model is required` | 两个后端都必须给 model/endpoint id |
+| 很多视频被 skip（no captions and ASR not configured） | 这些视频没字幕、又没配 ASR。配上 `ASR_API_KEY`+`ASR_MODEL`，或加 `--auto-subs` 用自动字幕 |
+| 想用 ASR 却全走了字幕 | 字幕优先是设计行为。要强制 ASR 可临时只对无字幕视频跑，或先确认目标频道确实没上传字幕 |
+| 自动字幕质量差/有重复 | 自动字幕本身如此；脚本已去时间轴并合并连续重复行。要更高质量就配 ASR |
+| ASR 配了 key 但仍跳过 | `ASR_MODEL` 没给齐——key 和 model 要同时设，否则按"未配 ASR"处理 |
 | yt-dlp 提示无 JS runtime / 缺 ffmpeg 的 WARNING | 仅警告，flat 列表与 bestaudio 下载不受影响，可忽略 |
 | 某条视频反复 FAIL | 可能是直播/会员/地区限制。先单独 `--ids <vid>` 复现；不行就从样本里剔除 |
 | payload 过大 / 超时 | 调小 `--chunk-seconds`（如 300）|

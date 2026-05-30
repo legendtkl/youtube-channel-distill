@@ -4,10 +4,18 @@
 # dependencies = ["openai>=1.40", "av>=12", "numpy", "yt-dlp"]
 # ///
 """
-Download YouTube audio and transcribe it to text via a configurable ASR backend.
+Turn YouTube videos into text transcripts, captions-first.
 
-This is the ASR engine for the `youtube-channel-distill` skill. It does NOT need a
-system ffmpeg — PyAV bundles the codecs and we resample/chunk in-process.
+This is the transcript engine for the `youtube-channel-distill` skill. Policy per
+video:
+  1. If the video has subtitles, use them (no ASR). Uploaded subtitles are
+     preferred; YouTube auto-generated captions are used only with --auto-subs.
+  2. If there are no usable captions, transcribe with ASR — but ONLY if ASR is
+     configured (ASR_API_KEY + ASR_MODEL present).
+  3. If there are no captions and ASR is not configured, the video is skipped.
+
+ASR (when used) needs NO system ffmpeg — PyAV bundles the codecs and we
+resample/chunk in-process.
 
 Network (counterintuitive, see references/asr-pipeline.md):
   - YouTube (yt-dlp) and the Ark endpoint both want a DIRECT connection.
@@ -68,20 +76,107 @@ def list_channel_video_ids(channel_url: str, limit: int) -> list[str]:
     return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
 
 
-def fetch_meta(vid: str) -> dict:
+def fetch_info(vid: str) -> dict:
+    """One yt-dlp -J call: returns the video's full metadata JSON, which also
+    carries `subtitles` (uploaded) and `automatic_captions` (auto-generated)."""
     url = f"https://www.youtube.com/watch?v={vid}"
     out = subprocess.run(
-        ["uvx", "yt-dlp", "--skip-download",
-         "--print", "%(title)s\t%(upload_date)s\t%(duration)s", url],
+        ["uvx", "yt-dlp", "--skip-download", "-J", url],
         capture_output=True, text=True,
     )
-    title, date, dur = "", "", ""
-    if out.returncode == 0 and out.stdout.strip():
-        parts = out.stdout.strip().split("\t")
-        title = parts[0] if len(parts) > 0 else ""
-        date = parts[1] if len(parts) > 1 else ""
-        dur = parts[2] if len(parts) > 2 else ""
-    return {"title": title, "date": date, "duration": dur}
+    if out.returncode != 0 or not out.stdout.strip():
+        raise RuntimeError(f"yt-dlp info fetch failed for {vid}:\n{out.stderr[-800:]}")
+    return json.loads(out.stdout)
+
+
+def meta_from_info(info: dict) -> dict:
+    return {
+        "title": info.get("title", "") or "",
+        "date": info.get("upload_date", "") or "",
+        "duration": info.get("duration", "") or "",
+    }
+
+
+# ----------------------------- subtitles (captions-first) ------------------
+
+# Subtitle formats we can parse, best first. json3 is cleanest; vtt/srt parse via
+# the same timestamp-stripping path; ttml/srv* are XML-ish and handled best-effort.
+_SUB_EXT_PREFERENCE = ["json3", "vtt", "srt", "srv3", "srv2", "srv1", "ttml"]
+
+
+def pick_subtitle(info: dict, langs: list[str], allow_auto: bool):
+    """Choose the best available subtitle track. Uploaded subtitles ('自带字幕')
+    are preferred; auto-generated captions are used only if allow_auto is set.
+    Language preference is honored in order, then any remaining track. Returns
+    (lang, kind, fmt_dict) or None."""
+    manual = info.get("subtitles") or {}
+    autos = info.get("automatic_captions") or {}
+
+    def choose_lang(table):
+        if not table:
+            return None
+        for want in langs:
+            for have in table:
+                if have == want or have.split("-")[0] == want.split("-")[0]:
+                    return have
+        return next(iter(table))  # any available track
+
+    for kind, table in (("manual", manual),) + ((("auto", autos),) if allow_auto else ()):
+        lang = choose_lang(table)
+        if lang:
+            fmts = table[lang]
+            fmt = min(
+                fmts,
+                key=lambda f: _SUB_EXT_PREFERENCE.index(f.get("ext"))
+                if f.get("ext") in _SUB_EXT_PREFERENCE else len(_SUB_EXT_PREFERENCE),
+            )
+            return lang, kind, fmt
+    return None
+
+
+def _strip_timestamps(raw: str) -> str:
+    out = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line == "WEBVTT":
+            continue
+        if line.startswith(("Kind:", "Language:", "NOTE")):
+            continue
+        if "-->" in line or line.isdigit():
+            continue
+        line = re.sub(r"<[^>]+>", "", line)   # inline timing/style tags
+        line = re.sub(r"\{[^}]+\}", "", line)
+        if line:
+            out.append(line)
+    deduped = []                              # auto-captions roll/repeat lines
+    for l in out:
+        if not deduped or deduped[-1] != l:
+            deduped.append(l)
+    return "\n".join(deduped)
+
+
+def _parse_json3(raw: str) -> str:
+    data = json.loads(raw)
+    parts = [seg.get("utf8", "") for ev in data.get("events", [])
+             for seg in (ev.get("segs") or [])]
+    text = "".join(parts)
+    return "\n".join(l.strip() for l in text.splitlines() if l.strip())
+
+
+def fetch_subtitle_text(fmt: dict) -> str:
+    import urllib.request
+    url = fmt.get("url")
+    if not url:
+        return ""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        raw = r.read().decode("utf-8", "replace")
+    if fmt.get("ext") == "json3":
+        try:
+            return _parse_json3(raw)
+        except Exception:  # noqa
+            return _strip_timestamps(raw)
+    return _strip_timestamps(raw)
 
 
 def download_audio(vid: str, tmpdir: Path) -> Path:
@@ -195,20 +290,55 @@ def transcribe_chunk_whisper(client, model, wav_bytes, prompt, retries=3):
 
 # ----------------------------- per-video flow ------------------------------
 
-def transcribe_video(vid, backend, model, client, prompt, chunk_seconds, concurrency, out_dir):
+def _write_output(out_path, meta, vid, source, body):
+    header = (
+        f"# {meta['title']} | {meta['date']} | dur={meta['duration']}s | vid={vid} | source={source}\n"
+        f"# https://www.youtube.com/watch?v={vid}\n\n"
+    )
+    out_path.write_text(header + body, encoding="utf-8")
+
+
+def transcribe_video(vid, asr_enabled, backend, model, client, prompt,
+                     chunk_seconds, concurrency, out_dir, sub_langs, allow_auto):
+    """Captions-first policy:
+      1. If the video has subtitles (uploaded; or auto-generated when --auto-subs)
+         use them — no ASR call.
+      2. Otherwise, transcribe with ASR — but only if ASR is configured.
+      3. If there are no usable captions and ASR is not configured, skip the video.
+    Returns one of: "captions", "asr", "skipped".
+    """
     out_path = out_dir / f"{vid}.txt"
     if out_path.exists() and out_path.stat().st_size > 200:
-        print(f"[skip] {vid} (already transcribed)")
-        return out_path
+        print(f"[skip] {vid} (already done)")
+        return "captions"  # already have text; don't re-fetch
 
-    meta = fetch_meta(vid)
+    info = fetch_info(vid)
+    meta = meta_from_info(info)
+
+    # 1) captions first
+    sub = pick_subtitle(info, sub_langs, allow_auto)
+    if sub:
+        lang, kind, fmt = sub
+        text = fetch_subtitle_text(fmt)
+        if text.strip():
+            src = f"captions:{kind}:{lang}"
+            _write_output(out_path, meta, vid, src, text)
+            print(f"[done] {vid}  {meta['title'][:40]!r}  via {src} ({len(text)} chars)")
+            return "captions"
+        print(f"[warn] {vid} had a {kind} {lang} track but it parsed empty; falling back")
+
+    # 2) no usable captions -> ASR only if configured
+    if not asr_enabled:
+        print(f"[skip] {vid}  {meta['title'][:40]!r}  no captions and ASR not configured")
+        return "skipped"
+
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         audio = download_audio(vid, tmp)
         pcm = decode_pcm16_mono_16k(audio)
 
     chunks = list(chunk_pcm(pcm, chunk_seconds))
-    print(f"[work] {vid}  {meta['title'][:40]!r}  {len(pcm)//16000}s -> {len(chunks)} chunks")
+    print(f"[work] {vid}  {meta['title'][:40]!r}  {len(pcm)//16000}s -> {len(chunks)} chunks (ASR)")
 
     def do_chunk(idx_chunk):
         idx, pcm_chunk = idx_chunk
@@ -228,13 +358,9 @@ def transcribe_video(vid, backend, model, client, prompt, chunk_seconds, concurr
             print(f"    [{vid}] chunk {idx+1}/{len(chunks)} ok")
 
     body = "\n".join(results[i] for i in sorted(results))
-    header = (
-        f"# {meta['title']} | {meta['date']} | dur={meta['duration']}s | vid={vid}\n"
-        f"# https://www.youtube.com/watch?v={vid}\n\n"
-    )
-    out_path.write_text(header + body, encoding="utf-8")
-    print(f"[done] {vid} -> {out_path} ({len(body)} chars)")
-    return out_path
+    _write_output(out_path, meta, vid, "asr", body)
+    print(f"[done] {vid} -> {out_path} via asr ({len(body)} chars)")
+    return "asr"
 
 
 def main():
@@ -251,10 +377,15 @@ def main():
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)
     ap.add_argument("--chunk-seconds", type=int, default=600)
     ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--sub-langs", default=os.environ.get("SUB_LANGS", "zh-Hans,zh,zh-Hant,en"),
+                    help="comma-separated subtitle language preference (captions-first)")
+    ap.add_argument("--auto-subs", action="store_true",
+                    help="also accept YouTube auto-generated captions, not just uploaded ones")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    sub_langs = [s.strip() for s in args.sub_langs.split(",") if s.strip()]
 
     if args.channel:
         vids = list_channel_video_ids(args.channel, args.limit)
@@ -266,23 +397,34 @@ def main():
     # 3-column listing whose tabs printed literally. Keep only the leading id token so the
     # output filename and watch?v= URL stay clean (titles can contain '/', which breaks paths).
     vids = [re.split(r"[\s\\]+", v)[0] for v in vids if v.strip()]
-    print(f"{len(vids)} videos -> {out_dir}  (backend={args.backend}, model={args.model})")
 
-    client = make_client()
-    if not args.model:
-        sys.exit("ASR_MODEL / --model is required for ark-omni and whisper-api backends.")
+    # ASR is optional. It's "configured" only when both a key and a model are present.
+    # Captions are always tried first; ASR only kicks in for videos without captions.
+    key = os.environ.get("ASR_API_KEY")
+    asr_enabled = bool(key) and bool(args.model)
+    if (key or args.model) and not asr_enabled:
+        print("[note] ASR is partially configured (need both ASR_API_KEY and ASR_MODEL) "
+              "-> treating ASR as DISABLED; videos without captions will be skipped.")
+    client = make_client() if asr_enabled else None
+    print(f"{len(vids)} videos -> {out_dir}  (captions-first, langs={sub_langs}, "
+          f"auto_subs={args.auto_subs}, asr={'on:'+args.backend if asr_enabled else 'off'})")
 
-    ok, fail = 0, []
+    counts = {"captions": 0, "asr": 0, "skipped": 0}
+    fail = []
     for vid in vids:
         try:
-            transcribe_video(vid, args.backend, args.model, client, args.prompt,
-                             args.chunk_seconds, args.concurrency, out_dir)
-            ok += 1
+            kind = transcribe_video(vid, asr_enabled, args.backend, args.model, client,
+                                    args.prompt, args.chunk_seconds, args.concurrency,
+                                    out_dir, sub_langs, args.auto_subs)
+            counts[kind] = counts.get(kind, 0) + 1
         except Exception as e:  # noqa
             print(f"[FAIL] {vid}: {e}", file=sys.stderr)
             fail.append(vid)
 
-    print(f"\nDone. {ok} ok, {len(fail)} failed.")
+    print(f"\nDone. {counts['captions']} via captions, {counts['asr']} via ASR, "
+          f"{counts['skipped']} skipped (no captions, ASR off), {len(fail)} failed.")
+    if counts["skipped"] and not asr_enabled:
+        print("Tip: configure ASR (ASR_API_KEY + ASR_MODEL) to transcribe the skipped videos.")
     if fail:
         print("Failed ids:", ",".join(fail))
         (out_dir / "_failed.txt").write_text("\n".join(fail))
