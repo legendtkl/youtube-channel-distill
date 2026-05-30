@@ -15,7 +15,10 @@
 | An ASR backend *(optional)* | transcribe videos **without** captions; skip it and caption-less videos are skipped | see [README → ASR backends](../README.md#asr-backends) |
 
 You do **not** need a system `ffmpeg` — `transcribe.py` decodes audio with PyAV,
-which bundles its own codecs.
+which bundles its own codecs. The Python packages (`yt-dlp`, `av`, `numpy`,
+`openai`) are auto-installed by `uv` from the inline metadata in
+`scripts/transcribe.py` — see the full
+[Dependencies](../README.md#dependencies) section for the complete list.
 
 ### 2. Install the skill into Claude
 
@@ -88,7 +91,9 @@ troubleshooting.
 | `yt-dlp` | 列视频 + 拉字幕/音频 | 由 `uvx yt-dlp` 按需拉取（无需手动安装） |
 | 一个 ASR 后端（可选） | 转写**没有字幕**的视频；不配则无字幕视频被跳过 | 见 [README → ASR 后端](../README.zh-CN.md#asr-后端) |
 
-**不需要**系统 `ffmpeg`——`transcribe.py` 用 PyAV 解码，自带编解码器。
+**不需要**系统 `ffmpeg`——`transcribe.py` 用 PyAV 解码，自带编解码器。Python 包
+（`yt-dlp`、`av`、`numpy`、`openai`）由 `uv` 按 `scripts/transcribe.py` 的内联声明自动安装——
+完整清单见 [依赖清单](../README.zh-CN.md#依赖清单)。
 
 ### 2. 把 skill 安装进 Claude
 

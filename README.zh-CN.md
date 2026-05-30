@@ -135,6 +135,46 @@ ASR 只对**没有字幕**的视频生效，且需配齐（`ASR_API_KEY` 和 `AS
 
 ---
 
+## 依赖清单
+
+你只需要自己装**两样**——`uv` 和 `git`。其余（Python 本身、`yt-dlp`、所有 Python 库）
+都由 `uv` 按 `scripts/transcribe.py` 里的内联声明**自动拉取并锁定版本**。
+
+### 需要你安装的工具
+
+| 工具 | 用途 | 安装 |
+|---|---|---|
+| [`uv`](https://docs.astral.sh/uv/) ≥ 0.4 | 运行脚本、解析安装 Python 依赖（含 `uvx yt-dlp`） | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| `git` | clone / 安装本 skill | 系统包管理器 |
+| 一个 POSIX shell（`bash`/`zsh`） | 运行 `scripts/list_videos.sh` | macOS/Linux 自带 |
+| **Python ≥ 3.10** | 脚本运行时 | **由 `uv` 托管**，无需手动装 |
+
+> **不需要系统 `ffmpeg`。** 音频解码/重采样由 PyAV 在进程内完成，自带编解码器。
+
+### Python 包（由 `uv` 自动安装，**请勿**手动装）
+
+内联声明（PEP 723）在 `scripts/transcribe.py` 的 `dependencies` 里：
+
+| 包 | 版本 | 用途 |
+|---|---|---|
+| [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) | 最新 | 列视频、拉字幕与音频 |
+| [`av`](https://pyav.org/)（PyAV） | ≥ 12 | 解码音频 → 16 kHz 单声道 PCM、进程内切片 |
+| [`numpy`](https://numpy.org/) | 最新 | PCM 缓冲处理 |
+| [`openai`](https://github.com/openai/openai-python) | ≥ 1.40 | OpenAI 兼容的 ASR 客户端（**仅 ASR 启用时**） |
+
+仅标准库（无需安装）：`argparse`、`base64`、`io`、`json`、`os`、`re`、`subprocess`、
+`sys`、`tempfile`、`wave`、`urllib.request`、`concurrent.futures`、`pathlib`。
+
+### 外部服务 / 运行环境
+
+| 依赖 | 是否必需 | 说明 |
+|---|---|---|
+| **YouTube** | 必需 | 视频 / 字幕 / 音频来源（需直连） |
+| **ASR 端点** | 可选 | 仅用于无字幕视频；OpenAI 兼容的 omni/chat 或 Whisper 端点 |
+| **Claude / Claude Code** | 阶段 3–5 需要 | 运行扇出蒸馏，把转写稿变成一个 skill |
+
+---
+
 ## 作为 Claude skill 安装
 
 直接 clone 到你的 Claude skills 目录：

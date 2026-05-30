@@ -149,6 +149,49 @@ network notes, tuning (`--chunk-seconds`, `--concurrency`), and troubleshooting.
 
 ---
 
+## Dependencies
+
+You only install **two** things yourself — `uv` and `git`. Everything else
+(Python itself, `yt-dlp`, the Python libraries) is fetched and pinned
+automatically by `uv` from the inline script metadata in `scripts/transcribe.py`.
+
+### Tools you install
+
+| Tool | Purpose | Install |
+|---|---|---|
+| [`uv`](https://docs.astral.sh/uv/) ≥ 0.4 | Runs the script and resolves/installs its Python deps (incl. `uvx yt-dlp`) | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| `git` | Clone/install the skill | system package manager |
+| A POSIX shell (`bash`/`zsh`) | Runs `scripts/list_videos.sh` | preinstalled on macOS/Linux |
+| **Python ≥ 3.10** | Script runtime | **managed by `uv`** — no manual install |
+
+> **No system `ffmpeg` needed.** Audio decoding/resampling is done in-process by
+> PyAV, which bundles its own codecs.
+
+### Python packages (auto-installed by `uv`, do **not** install manually)
+
+Declared inline (PEP 723) in `scripts/transcribe.py` → `dependencies`:
+
+| Package | Version | Used for |
+|---|---|---|
+| [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) | latest | list videos, fetch subtitles & audio |
+| [`av`](https://pyav.org/) (PyAV) | ≥ 12 | decode audio → 16 kHz mono PCM, chunk in-process |
+| [`numpy`](https://numpy.org/) | latest | PCM buffer handling |
+| [`openai`](https://github.com/openai/openai-python) | ≥ 1.40 | OpenAI-compatible ASR client (**only when ASR runs**) |
+
+Standard-library only (no install): `argparse`, `base64`, `io`, `json`, `os`,
+`re`, `subprocess`, `sys`, `tempfile`, `wave`, `urllib.request`,
+`concurrent.futures`, `pathlib`.
+
+### External services / runtime
+
+| Dependency | Required? | Notes |
+|---|---|---|
+| **YouTube** | yes | source of videos / subtitles / audio (wants a direct connection) |
+| **ASR endpoint** | optional | only for caption-less videos; OpenAI-compatible omni/chat or Whisper endpoint |
+| **Claude / Claude Code** | for stages 3–5 | runs the fan-out distillation that turns transcripts into a skill |
+
+---
+
 ## Install as a Claude skill
 
 Clone the repo straight into your Claude skills directory:
